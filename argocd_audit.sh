@@ -52,7 +52,10 @@ acd() {
     --header "Cookie: CF_Authorization=${CF_ACCESS_TOKEN}"
 }
 
-if [ -z "$OUT" ]; then OUT="./argocd-audit-$(date -u +%Y%m%dT%H%M%SZ)"; fi
+if [ -z "$OUT" ]; then
+  server_name=$(printf '%s' "$ARGOCD_SERVER" | LC_ALL=C tr -c 'A-Za-z0-9._-' '-')
+  OUT="./argocd-audit-${server_name}-$(date -u +%Y%m%dT%H%M%SZ)"
+fi
 if [ -d "$OUT" ] && [ -n "$(ls -A "$OUT")" ]; then
   printf 'Refusing to overwrite nonempty evidence folder: %s\n' "$OUT" >&2
   exit 2
@@ -139,6 +142,9 @@ if jq -e . "$OUT/inventory/projects.json" >/dev/null 2>&1; then
       check_actions projects "$project" get create update delete
       check_actions applications "$project/*" get create update delete sync rollback override 'action/*' 'update/*' 'delete/*'
       check_actions applicationsets "$project/*" get create update delete
+      check_actions repositories "$project/*" get create update delete
+      check_actions write-repositories "$project/*" get create update delete
+      check_actions clusters "$project/*" get create update delete
       check logs get "$project/*"
       check exec create "$project/*"
     done
@@ -201,22 +207,26 @@ if jq -e . "$OUT/inventory/applicationsets.json" >/dev/null 2>&1; then
 fi
 
 if jq -e . "$OUT/inventory/repositories.json" >/dev/null 2>&1; then
-  jq -r 'if type=="array" then .[] else (.items // [])[] end | .repo // .url // empty' \
-    "$OUT/inventory/repositories.json" | sort -u | while IFS= read -r repo; do
+  jq -r 'if type=="array" then .[] else (.items // [])[] end |
+    [.repo // .url // "", .project // ""] | @tsv' \
+    "$OUT/inventory/repositories.json" | sort -u | while IFS="$(printf '\t')" read -r repo project; do
       [ -n "$repo" ] || continue
-      check_actions repositories "$repo" get create update delete
-      check_actions write-repositories "$repo" get create update delete
+      if [ -n "$project" ]; then object="$project/$repo"; else object=$repo; fi
+      check_actions repositories "$object" get create update delete
+      check_actions write-repositories "$object" get create update delete
     done
 fi
 
 if jq -e . "$OUT/inventory/clusters.json" >/dev/null 2>&1; then
-  jq -r 'if type=="array" then .[] else (.items // [])[] end | .server // empty' \
-    "$OUT/inventory/clusters.json" | sort -u | while IFS= read -r cluster; do
+  jq -r 'if type=="array" then .[] else (.items // [])[] end |
+    [.server // "", .project // ""] | @tsv' \
+    "$OUT/inventory/clusters.json" | sort -u | while IFS="$(printf '\t')" read -r cluster project; do
       [ -n "$cluster" ] || continue
-      id=$(safe_id "$cluster")
-      printf '%s\n' "$cluster" > "$OUT/details/clusters/$id.id"
+      if [ -n "$project" ]; then object="$project/$cluster"; else object=$cluster; fi
+      id=$(safe_id "$object")
+      printf '%s\n' "$object" > "$OUT/details/clusters/$id.id"
       capture clusters "$cluster" "$OUT/details/clusters/$id.json" cluster get "$cluster" -o json
-      check_actions clusters "$cluster" get create update delete
+      check_actions clusters "$object" get create update delete
     done
 fi
 
@@ -262,3 +272,4 @@ printf 'Finished UTC: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$OUT/run-info.t
 printf 'Evidence folder: %s\n' "$OUT"
 printf 'Permission decisions: '; tail -n +2 "$MATRIX" | cut -f4 | sort | uniq -c
 printf 'Failed/unsupported inventory commands: '; awk -F '\t' 'NR>1 && $4!=0 {n++} END {print n+0}' "$STATUS"
+
